@@ -15,16 +15,39 @@
   $$('a', nav).forEach(a => a.addEventListener('click', () => setMenu(false)));
   addEventListener('keydown', e => { if (e.key === 'Escape') setMenu(false); });
 
+  /* 道を「始まりから今の長さまで」の線で見せる道具。
+     破線のずらし（stroke-dashoffset）は Safari と Chrome で長さの計算が違い、Safari では道が切れ切れに現れたので使わない。
+     道の上の点を先に取っておき、毎コマその点で線を引き直す */
+  const bez = (x1, y1, x2, y2) => t => {   // cubic-bezier の進み方
+    let a = t; for (let i = 0; i < 8; i++) { const x = 3 * (1 - a) * (1 - a) * a * x1 + 3 * (1 - a) * a * a * x2 + a * a * a - t, dx = 3 * (1 - a) * (1 - a) * x1 + 6 * (1 - a) * a * (x2 - x1) + 3 * a * a * (1 - x2); if (Math.abs(x) < 1e-5 || !dx) break; a = Math.min(1, Math.max(0, a - x / dx)); }
+    return 3 * (1 - a) * (1 - a) * a * y1 + 3 * (1 - a) * a * a * y2 + a * a * a;
+  };
+  function growLine(src, target, n) {
+    const L = src.getTotalLength(), pts = [];
+    for (let i = 0; i <= n; i++) { const q = src.getPointAtLength(L * i / n); pts.push(`${q.x.toFixed(1)} ${q.y.toFixed(1)}`); }
+    let shown = 0, raf = 0;
+    const draw = f => { shown = Math.min(1, Math.max(0, f)); const k = Math.round(shown * n); target.setAttribute('d', k < 1 ? 'M-9999 -9999' : 'M' + pts.slice(0, k + 1).join('L')); };
+    const to = (f, ms, ease, delay = 0) => {
+      cancelAnimationFrame(raf); const from = shown; let t0 = null;
+      if (reduce || !ms) { draw(f); return; }
+      const step = now => { if (t0 === null) t0 = now + delay; const u = Math.min(1, Math.max(0, (now - t0) / ms)); draw(from + (f - from) * ease(u)); if (u < 1) raf = requestAnimationFrame(step); };
+      raf = requestAnimationFrame(step);
+    };
+    return { draw, to, get shown() { return shown; } };
+  }
+
   /* ── 表紙：印の中の道筋を、鳥取から宍粟へ描き進める ── */
   const road = $('#heroRoad');
   if (road && window.ROAD) {
-    const R = window.ROAD.paths, m = R[0].m, tr = `matrix(${m.join(' ')})`, L = R[0].len;
+    const R = window.ROAD.paths, m = R[0].m, tr = `matrix(${m.join(' ')})`;
     const defs = el('defs', {}, road), mask = el('mask', { id: 'roadMask', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: 1000, height: 1000 }, defs);
-    const reveal = el('path', { d: R[0].d, transform: tr, fill: 'none', stroke: '#fff', 'stroke-width': 80, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'stroke-dasharray': `${L} ${L}`, 'stroke-dashoffset': reduce ? 0 : L }, mask);
+    const reveal = el('path', { d: 'M-9999 -9999', transform: tr, fill: 'none', stroke: '#fff', 'stroke-width': 80, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, mask);
     const g = el('g', { mask: 'url(#roadMask)' }, road);
-    R.forEach(p => el('path', { d: p.d, transform: tr, fill: 'none', stroke: p.stroke, 'stroke-width': p.w, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', ...(p.dash ? { 'stroke-dasharray': p.dash } : {}) }, g));
-    if (!reduce) {
-      const start = () => reveal.animate([{ strokeDashoffset: L }, { strokeDashoffset: 0 }], { duration: 2600, delay: 350, easing: 'cubic-bezier(.45,.05,.25,1)', fill: 'forwards' });
+    const drawn = R.map(p => el('path', { d: p.d, transform: tr, fill: 'none', stroke: p.stroke, 'stroke-width': p.w, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', ...(p.dash ? { 'stroke-dasharray': p.dash } : {}) }, g));
+    const grow = growLine(drawn[0], reveal, 600);
+    if (reduce) grow.draw(1);
+    else {
+      const start = () => grow.to(1, 2600, bez(.45, .05, .25, 1), 350);
       const img = $('.hero-logo'); img.complete ? start() : img.addEventListener('load', start, { once: true });
     }
   }
@@ -61,24 +84,24 @@
 
   /* ── コース：左に固定した地図。いま見ているコースの点が光り、道がそこまでのびる ── */
   const cmap = $('#cmap'), cards = $$('.course');
-  let cRoadLen = 0, cMaskPath = null, cOn = -9;
+  let cGrow = null, cOn = -9;
+  const cEase = bez(.4, .1, .2, 1);
   if (cmap && window.CMAP) {
     cmap.innerHTML = CMAP.svg;
     const svg = $('svg', cmap), road = $('#cmapRoad', svg), roadc = $('#cmapRoadC', svg);
-    cRoadLen = road.getTotalLength();
     const defs = el('defs'); svg.insertBefore(defs, svg.firstChild);
     const vb = svg.viewBox.baseVal;
     const mask = el('mask', { id: 'cmapMask', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: vb.width, height: vb.height }, defs);
-    cMaskPath = el('path', { d: road.getAttribute('d'), fill: 'none', stroke: '#fff', 'stroke-width': 18, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'stroke-dasharray': `${cRoadLen} ${cRoadLen}`, 'stroke-dashoffset': cRoadLen }, mask);
+    const mp = el('path', { d: 'M-9999 -9999', fill: 'none', stroke: '#fff', 'stroke-width': 18, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, mask);
     const g = el('g', { mask: 'url(#cmapMask)' }); road.parentNode.insertBefore(g, road); g.appendChild(road); g.appendChild(roadc);
-    if (!reduce) cMaskPath.style.transition = 'stroke-dashoffset .9s cubic-bezier(.4,.1,.2,1)';
+    cGrow = growLine(road, mp, 800);
   }
   function setCourse(i) {
-    if (!cMaskPath || i === cOn) return; cOn = i;
+    if (!cGrow || i === cOn) return; cOn = i;
     $$('.c-pin', cmap).forEach((p, k) => p.classList.toggle('is-on', k === i));
     cards.forEach((c, k) => c.classList.toggle('is-on', k === i));
     const fr = i >= 0 ? CMAP.pins[i].fr : (i === -2 ? 1 : 0);
-    cMaskPath.setAttribute('stroke-dashoffset', (cRoadLen * (1 - fr)).toFixed(1));
+    cGrow.to(fr, 900, cEase);
   }
   function onCourseScroll() {
     if (!cards.length) return;
